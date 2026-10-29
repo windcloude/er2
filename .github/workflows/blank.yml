@@ -62,6 +62,12 @@ jobs:
             zlib1g-dev swig unzip time rsync python3 python3-setuptools \
             python3-yaml wget curl ca-certificates
 
+      - name: 配置 git 身份（setup.py 内部打补丁需要 commit）
+        run: |
+          git config --global user.email "build@local"
+          git config --global user.name "ER2 Build"
+          git config --global --add safe.directory '*'
+
       - name: 克隆 wlan-ap (er2 分支)
         working-directory: /mnt/er2
         run: |
