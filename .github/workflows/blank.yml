@@ -42,7 +42,8 @@ jobs:
                      /opt/ghc /usr/local/.ghcup /usr/lib/firefox /usr/lib/mono \
                      /usr/local/share/boost /opt/az /usr/lib/llvm-* /usr/share/swift \
                      /opt/microsoft/msedge /opt/pipx /var/lib/docker
-          sudo rm -f /swapfile /mnt/swapfile
+          sudo swapoff -a 2>/dev/null || true
+          sudo rm -f /swapfile /mnt/swapfile 2>/dev/null || true
           sudo apt-get clean
           docker system prune -a -f 2>/dev/null || true
           df -h /
