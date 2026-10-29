@@ -1,0 +1,122 @@
+# ============================================================================
+# 京东云 太乙Plus ER2 (re-cs-08 / jdcloud,er2) — QSDK 6.6 / OpenWrt 25.12.5 云编译
+# 源码仓库：https://github.com/zt406600/wlan-ap  (分支 er2，fork 自 Telecominfraproject/wlan-ap)
+# 内核：Linux 6.6.88   target：ipq53xx/generic   SoC：ipq5332
+#
+# 构建方式采用作者 README 的「方式 B 手动构建」(defconfig 含完整 LuCI)，
+# 再手动追加 Docker 全家桶（默认 defconfig 未含 docker）。
+#
+# 构建资源说明：
+#   本构建含 QSDK/NSS 闭源驱动 + kenzok8/small-package 巨 feed，编译 ~351 包 + NSS 内核模块，
+#   中间产物约 30–50 GB，耗时较长。
+#   ✅ 免费 ubuntu-latest runner 已用 maximize-build-space 扩容到 ~60GB，可成功编译；
+#      但免费 runner 仅 2 vCPU，全量编译可能 3–5 小时（接近 6h 上限），属临界。
+#   💡 更稳更快：把 runs-on 改成 GitHub 付费 large runner（如 16 vCPU/64GB/200GB），
+#      或 self-hosted runner（在你自己机器装 Actions runner）。
+# ============================================================================
+
+name: ER2 QSDK 6.6 Build (wlan-ap er2)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths: [ '.github/workflows/er2-qsdk66-build.yml' ]
+
+jobs:
+  build:
+    # 免费 ubuntu-latest 不现实；请改成 self-hosted 或 GitHub 付费 large runner
+    # (例如 runs-on: [self-hosted, linux, x64] 或 ubuntu-24.04-xxxlarge)
+    runs-on: ubuntu-latest
+
+    steps:
+      # 关键：GitHub 免费 runner 默认仅 ~22GB 可用，OpenWrt 全量编译需 50GB+。
+      # 用 maximize-build-space 删除预装软件（Android/.NET/Haskell/CodeQL/Docker 镜像）
+      # 释放到 ~60GB，让免费 runner 也能编。必须放在 clone 之前（会遮罩工作目录）。
+      - name: 释放磁盘空间（maximize-build-space）
+        uses: nepalevov/maximize-build-space@v1
+        with:
+          remove-android: 'true'
+          remove-dotnet: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+
+      - name: 查看可用磁盘
+        run: df -h /
+
+      - name: 安装编译依赖（Debian/Ubuntu）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libncurses5-dev gawk git libssl-dev gettext \
+            zlib1g-dev swig unzip time rsync python3 python3-setuptools \
+            python3-yaml wget curl ca-certificates
+
+      - name: 克隆 wlan-ap (er2 分支)
+        run: |
+          git clone -b er2 --depth 1 https://github.com/zt406600/wlan-ap.git wlan-ap-er2
+          cd wlan-ap-er2 && git log --oneline -1
+
+      # setup.py 会按 config.yml 拉取 openwrt-25.12@f0a60eee(=v25.12.5)，
+      # 套用 patches-25.12（ER2 板级/NSS/PPE/ECM/fullcone 补丁），
+      # 并把本仓库 profiles/ 链接进 openwrt/
+      - name: setup（拉 OpenWrt 源码 + 打补丁 + 链接 profiles）
+        working-directory: wlan-ap-er2
+        run: ./setup.py --setup
+
+      # 国内/受限网络用 gh-proxy 镜像 git 操作；Actions 节点直连 GitHub 通常通畅，
+      # 若 smpackage 的 dockerd/rblibtorrent 仍卡在 codeload 下载，请给 runner 配代理。
+      - name: 配置 git 镜像（gh-proxy，可选）
+        run: |
+          printf '[url "https://gh-proxy.org/https://github.com/"]\n\tinsteadOf = https://github.com/\n' > /tmp/git-mirror
+
+      - name: gen_config + feeds update/install
+        working-directory: wlan-ap-er2
+        run: |
+          cd openwrt
+          GIT_CONFIG_GLOBAL=/tmp/git-mirror ./scripts/gen_config.py jdcloud_er2
+          GIT_CONFIG_GLOBAL=/tmp/git-mirror ./scripts/feeds update -a
+          GIT_CONFIG_GLOBAL=/tmp/git-mirror ./scripts/feeds install -a
+          cd ..
+          ./setup.py --feed-patches
+
+      # 把 Docker 固化进作者 defconfig 基线（改 not-set 为 =y），从基线固化，
+      # 避免 make defconfig 归一化时把末尾追加的符号静默丢弃。
+      # M.2/NVMe 软件侧作者已含(kmod-nvme/nvme-cli/block-mount/kmod-fs-ext4/parted)。
+      - name: 固化 Docker 进 defconfig 基线并生成 .config
+        working-directory: wlan-ap-er2/openwrt
+        run: |
+          sed -i \
+            -e 's|# CONFIG_PACKAGE_docker is not set|CONFIG_PACKAGE_docker=y|' \
+            -e 's|# CONFIG_PACKAGE_dockerd is not set|CONFIG_PACKAGE_dockerd=y|' \
+            -e 's|# CONFIG_PACKAGE_luci-app-dockerman is not set|CONFIG_PACKAGE_luci-app-dockerman=y|' \
+            -e 's|# CONFIG_PACKAGE_luci-app-dockermanager is not set|CONFIG_PACKAGE_luci-app-dockermanager=y|' \
+            -e 's|# CONFIG_PACKAGE_docker-compose is not set|CONFIG_PACKAGE_docker-compose=y|' \
+            -e 's|# CONFIG_PACKAGE_containerd is not set|CONFIG_PACKAGE_containerd=y|' \
+            ../defconfig/jdc-er2.config
+          cp ../defconfig/jdc-er2.config .config
+          make defconfig
+          echo "--- 校验 Docker 是否真正进入最终配置 ---"
+          for p in docker dockerd luci-app-dockerman containerd docker-compose; do
+            if grep -q "^CONFIG_PACKAGE_${p}=y" .config; then echo "  [OK] $p"; else echo "  [MISSING] $p"; fi
+          done
+
+      - name: 下载源码包
+        working-directory: wlan-ap-er2/openwrt
+        run: make -j$(nproc) download V=s
+
+      - name: 编译
+        working-directory: wlan-ap-er2/openwrt
+        run: make -j$(nproc) V=s
+        timeout-minutes: 300
+
+      - name: 列出产物
+        run: ls -lh wlan-ap-er2/openwrt/bin/targets/ipq53xx/generic/
+
+      - name: 上传固件 Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: er2-firmware-${{ github.run_id }}
+          path: wlan-ap-er2/openwrt/bin/targets/ipq53xx/generic/*.bin
+          if-no-files-found: warn
